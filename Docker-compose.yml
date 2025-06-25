@@ -1,0 +1,100 @@
+services:
+  db:
+    image: postgres:15-alpine
+    restart: always
+    ports:
+      - "5432:5432"
+    env_file:
+      - .env
+    volumes:
+      - pg_data:$PGDATA
+      - ./backups:/app/backups
+#      - db_backups:$DBBACKUP
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep PONG"]
+      interval: 1s
+      timeout: 3s
+      retries: 5
+      start_period: 3s
+
+  celery_beat:
+    build: .
+    restart: always
+    env_file:
+      - .env
+    volumes:
+      - ./autoria:/app/autoria
+      - ./backups:/app/backups
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["celery", "-A", "autoria.celery_app", "beat", "--loglevel=info", "--pidfile=/tmp/celerybeat.pid", "--schedule=/tmp/celerybeat-schedule"]
+
+
+  celery_worker:
+    build: .
+    restart: on-failure
+    env_file:
+      - .env
+    environment:
+      - C_FORCE_ROOT=true  # run Celery from root in docker
+      - POSTGRES_HOST=db
+    volumes:
+      - ./autoria:/app/autoria
+      - ./backups:/app/backups
+#      - db_backups:$DBBACKUP
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["celery", "-A", "autoria.celery_app", "worker", "-l", "info", "-Q", "scrapy_tasks"]
+
+  celery_backup_worker:
+    build: .
+    restart: on-failure
+    env_file:
+      - .env
+    environment:
+      - C_FORCE_ROOT=true
+      - POSTGRES_HOST=db
+    volumes:
+      - ./autoria:/app/autoria
+      - ./backups:/app/backups
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["celery", "-A", "autoria.celery_app", "worker", "-l", "info", "-Q", "backup_tasks"]
+
+  flower:
+    build: .
+    ports:
+      - "5555:5555"
+    env_file:
+      - .env
+    environment:
+      - FLOWER_UNAUTHENTICATED_API=true  # Dev
+    volumes:
+      - ./autoria:/app/autoria
+      - ./backups:/app/backups
+    depends_on:
+      - celery_worker
+      - redis
+    command: "celery -A autoria.celery_app flower --address=0.0.0.0"
+
+volumes:
+  pg_data:
+#  db_backups:
